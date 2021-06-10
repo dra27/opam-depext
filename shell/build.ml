@@ -1,3 +1,11 @@
+let is_win = Sys.os_type = "Win32"
+
+let () =
+  if is_win then (
+    set_binary_mode_out stdout true;
+    set_binary_mode_out stderr true;
+  )
+
 module OCaml_version : sig
    type t
    val v : ?patch:int -> ?extra:string -> int -> int -> t
@@ -71,11 +79,13 @@ end = struct
      List.iter (fun v -> Printf.eprintf "%s compared to %s: %d\n%!" (to_string t) (to_string v) (compare t v)) vers_t
 end
 
+let exe = if is_win then ".exe" else ""
+
 let build_bytecode () =
-  print_endline "ocamlc -I src_ext/lib unix.cma cmdliner.cma -o opam-depext depext.ml"
+  Printf.printf "ocamlc -I src_ext/lib unix.cma cmdliner.cma -o opam-depext%s depext.ml\n" exe
 
 let build_native () =
-  print_endline "ocamlopt -I src_ext unix.cmxa cmdliner.cmxa -o opam-depext depext.ml"
+  Printf.printf "ocamlopt -I src_ext/lib unix.cmxa cmdliner.cmxa -o opam-depext%s depext.ml\n" exe
 
 let usage () =
   Printf.eprintf "Usage: ocaml build.ml [byte|native]\n\nDefaults to 'native' build.\n%!";

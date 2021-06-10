@@ -31,6 +31,22 @@ let lines_of_command c =
   | Unix.WSTOPPED i ->
     fatal_error "Command failed: %s stopped %d" c i
 
+let open_process_out argv =
+  let (in_read, in_write) = Unix.pipe () in
+  Unix.set_close_on_exec in_read;
+  let ch = Unix.in_channel_of_descr in_read in
+  set_binary_mode_in ch false;
+  let pid = Unix.create_process argv.(0) argv Unix.stdin in_write Unix.stderr in
+  Unix.close in_write;
+  (pid, ch)
+
+let lines_of_argv argv =
+  let pid,ch = open_process_out argv in
+  let lines = lines_of_channel ch in
+  close_in ch;
+  ignore (Unix.waitpid [] pid);
+  lines
+
 let lines_of_file f =
   let ic = open_in f in
   let lines = lines_of_channel ic in
@@ -53,12 +69,21 @@ let string_split char str =
   in
   aux 0
 
+let is_win = Sys.os_type = "Win32"
+
 let has_command c =
-  let cmd = Printf.sprintf "command -v %s >/dev/null" c in
+  let cmd =
+    if is_win then
+      Printf.sprintf "dash.exe -ec 'command -v %s' >NUL" c
+    else
+      Printf.sprintf "command -v %s >/dev/null" c
+  in
   try Sys.command cmd = 0 with Sys_error _ -> false
 
+let dev_null = if is_win then "NUL" else "/dev/null"
+
 let run_command ?(no_stderr=false) c =
-  let c = if no_stderr then c @ ["2>/dev/null"] else c in
+  let c = if no_stderr then c @ ["2>" ^ dev_null] else c in
   let c = String.concat " " c in
   if !debug then Printf.eprintf "+ %s\n%!" c;
   Unix.system c
@@ -79,6 +104,24 @@ let opam_version = lazy (
   command_output "opam --version"
 )
 
+let execvp =
+  if is_win = false then
+    Unix.execvp
+  else
+    fun cmd args ->
+      let pid =
+        Unix.create_process
+          cmd
+          args
+          Unix.stdin
+          Unix.stdout
+          Unix.stderr
+      in
+      match snd (Unix.waitpid [] pid) with
+      | Unix.WEXITED n -> exit n
+      | Unix.WSIGNALED _ -> exit 2 (* like OCaml's uncaught exceptions *)
+      | Unix.WSTOPPED _ -> exit 1
+
 (* system detection *)
 
 let has_prefix s pfx =
@@ -98,7 +141,14 @@ let opam_query_global var =
 
 let arch = opam_query_global "arch"
 let os = opam_query_global "os"
-let distribution = opam_query_global "os-distribution"
+let distribution =
+  if not is_win then
+    opam_query_global "os-distribution"
+  else if has_command "cygwin-install" then
+    "cygwinports"
+  else
+    "win32"
+
 let family = opam_query_global "os-family"
 
 let opam_vars = [
@@ -167,7 +217,26 @@ let install_packages_commands ~interactive packages =
   | "alpine" ->
     ["apk"::"add"::yes ~no:["-i"] [] packages]
   | "suse" | "opensuse" ->
-    ["zypper"::yes ["--non-interactive"] ("install"::packages)]
+     ["zypper"::yes ["--non-interactive"] ("install"::packages)]
+  | "windows" when distribution = "cygwinports" ->
+     let rec iter accu_whole accu_cur len = function
+       | [] ->
+          if accu_cur = [] then
+            List.rev accu_whole
+          else
+            List.rev (add_a accu_whole accu_cur)
+       | hd::tl ->
+          let hd_len = String.length (Filename.quote hd) + 2 in
+          if len + hd_len > 7_000 then
+            iter (add_a accu_whole accu_cur) [hd] hd_len tl
+          else
+            iter accu_whole (hd::accu_cur) (len + hd_len) tl
+     and add_a accu_whole accu_cur =
+       let hda = "cygwin-install.exe"::"install"::(List.rev accu_cur) in
+       hda::accu_whole
+     in
+     iter [] [] 0 packages
+  | "windows" -> [["true"]] (* not supported yet *)
   | s ->
     fatal_error "Sorry, don't know how to install packages on your %s system" s
 
@@ -194,6 +263,15 @@ module StringMap = Map.Make(String)
 
 (* filter 'packages' to retain only the installed ones *)
 let get_installed_packages (packages: string list): string list =
+  let f query_command_prefix =
+    List.filter
+      (fun pkg_name ->
+         let cmd = query_command_prefix @ [pkg_name] in
+         match run_command ~no_stderr:true cmd with
+         | Unix.WEXITED 0 -> true (* installed *)
+         | Unix.WEXITED 1 -> false (* not installed *)
+         | exit_status -> raise (Signaled_or_stopped (cmd, exit_status))
+      ) packages in
   match family with
   | "homebrew" ->
     let lines = try lines_of_command "brew list" with _ -> [] in
@@ -264,14 +342,8 @@ let get_installed_packages (packages: string list): string list =
       | "alpine" -> ["apk"; "info"; "-e"]
       | _ -> fatal_error "Distribution %s is not supported" distribution
     in
-    List.filter
-      (fun pkg_name ->
-         let cmd = query_command_prefix @ [pkg_name] in
-         match run_command ~no_stderr:true cmd with
-         | Unix.WEXITED 0 -> true (* installed *)
-         | Unix.WEXITED 1 -> false (* not installed *)
-         | exit_status -> raise (Signaled_or_stopped (cmd, exit_status))
-      ) packages
+    f query_command_prefix
+  | "windows" when distribution = "cygwinports" -> f [ "cygwin-install.exe"; "status" ]
   | "bsd" ->
     (match distribution with
      | "freebsd" ->
@@ -402,7 +474,7 @@ let main print_flags list short
     let opam_cmdline = opam_cmdline @ (if with_tests_arg then ["--with-test"] else [])
       @ (if with_docs_arg then ["--with-doc"] else []) in
     (if !debug then Printf.eprintf "+ %s\n%!" (String.concat " " opam_cmdline));
-    Unix.execvp "opam" (Array.of_list opam_cmdline)
+    execvp "opam" (Array.of_list ("opam"::"install"::opam_packages))
   end
 
 open Cmdliner
