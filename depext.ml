@@ -19,6 +19,7 @@ let fatal_error ?(exit_code=1) fmt =
 let lines_of_command c =
   if !debug then Printf.eprintf "+ %s\n%!" c;
   let ic = Unix.open_process_in c in
+  set_binary_mode_in ic false;
   let lines = lines_of_channel ic in
   match Unix.close_process_in ic with
   | Unix.WEXITED 0 -> lines
